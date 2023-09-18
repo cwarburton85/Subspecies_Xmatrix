@@ -1,0 +1,359 @@
+
+import Pkg
+Pkg.add("DelimitedFiles")
+Pkg.add("DataFrames")
+Pkg.add("DataFramesMeta")
+Pkg.add("FreqTables")
+Pkg.add("CSV")
+Pkg.add("StatsBase")
+Pkg.add("GLM")
+Pkg.add("CategoricalArrays")
+Pkg.add("LinearAlgebra")
+Pkg.add("DataFrames")
+Pkg.add("Statistics")
+Pkg.add("StringDistances")
+Pkg.add("BenchmarkTools")
+
+using DelimitedFiles, Statistics, LinearAlgebra,  CSV, DataFramesMeta, FreqTables, StatsBase, DataFrames, DataFrames, GLM, CategoricalArrays, StringDistances, BenchmarkTools
+
+hap_size=10000
+
+println("haplotype size is ", hap_size)
+
+#Define breeds that are in each subspecies in the reference population
+Bi_breeds =["BB"]
+Bt_breeds=["SS","HH","AA","LL", "CC"]
+
+#Read in vcf file with 10 header lines and drop all headers
+test =DataFrame(readdlm("ref.vcf"), :auto)
+println("Size of test is ", size(test))
+test2 = test[11:end,:]
+println("Size of test2 is ", size(test2))
+
+println("Analyse reference population - split into Bi and Bt to get frequency of haplotype by subspecies")
+#Get list of ids - from row b=number 10 in the vcf file
+tmp = Array{Any}(test[10,10:end]) #get list of id_list
+
+ids = DataFrame(id = [1035,1083,1131,1143,10024],
+                breed = ["BB", "SS", "HH", "BB", "AA"])
+
+
+#Remove header lines from data and transpoase dataframe to get id * marker dataframe
+test3 = test[10:end,:]
+select!(test3, Not([:x1, :x2, :x3, :x4, :x5, :x6, :x7, :x8, :x9]))
+test3 = DataFrame([[names(test3)]; collect.(eachrow(test3))], [:column; Symbol.(axes(test3, 1))])
+select!(test3, Not([:column]))
+rename!(test3, :1 => :id)
+println("Size of test3 is ", size(test3))
+
+
+#JOIN id and tranposed dataframe together to get a list of index for loop for each subspecies
+test3 = innerjoin(test3, ids, on = :id =>:id)
+
+#Assigns Bt and Bi based upon the Bi_breeds and Bt_breeds arrays above.
+for anim in 1:size(test3)[1]
+        if test3[anim,:breed] .∈ Ref(Set(Bi_breeds))
+        test3[anim,:breed] ="Bi"
+    else
+        test3[anim,:breed] ="Bt"
+    end
+end
+
+println("Subspecies in ref assigned")
+
+n_bi = size(@subset(test3, :breed .== "Bi"))
+n_bt =size(@subset(test3, :breed .== "Bt"))
+println("number of bi is ", n_bi)
+println("number of bt is ", n_bt)
+
+#Turns id and breed into an array so that index values of each Bi and Bt animal can be identified to use to subset the vcf columns
+#Iterate over the index values for Bi and Bt to subset Bi and Bt haplotypes from original vcf files to use haplotype function
+Bi_ref = hcat(collect(1:n_bi[1]), findall( x -> occursin("Bi", x), test3[:,:breed]))
+Bt_ref = hcat(collect(1:n_bt[1]), findall( x -> occursin("Bt", x), test3[:,:breed]))
+println("size of Bi_ref is ", size(Bi_ref))
+println("size of Bt ref is ", size(Bt_ref))
+
+println("Now defining function")
+#Define function - first 10 header lines of vcf file need to be removed
+#X=haplotype size
+#y=vcf file name
+function haplotype(x,y)
+    chr_end=findmax(y[!,:x2])[1]
+    m=0
+    n=1
+    n_anim=size(y)[2]-9
+    n_bp=chr_end + x
+    ref_n = Int(ceil(n_bp/x))
+    B = Array{Any}(undef,ref_n,(n_anim*2)+1)
+    tmp2=[]
+    marker_hap_list=[]
+
+    while m < n_bp
+        for a in 1 : n_anim
+            hap_size= m + x
+            test4 = y[(y[:,2].>m).&(y[:,2].<=hap_size),:]
+            if size(test4)[1] > 0
+                B[n,1] = m
+                tmp2=DataFrame(split.(test4[:,a+9],'|'), :auto)
+                B[n,(a*2)]=join(tmp2[1,:])
+                B[n,(a*2)+1]=join(tmp2[2,:])
+
+            else
+                B[n,1] = m
+                B[n,(a*2)]="NA"
+                B[n,(a*2)+1]="NA"
+            end
+        end
+        m+=x
+        n+=1
+    end
+    B2=DataFrame(B, :auto) 
+    B3 = filter(row -> !(row.x2 == "NA"),  B2) #Removes any rows that have no SNP in haplotype
+    return B3 #Returns matrix with only regions that have haplotypes
+end
+
+println("Function defined")
+println("size of test3 is ", size(test3))
+
+#Loop through test3 and subset out data for each sub-species
+#Need to create 2 "vcf" files for each sub species for function - so adding vcf cols to subspecies data
+Bi_data=Array{Any}(undef,size(test3)[2]-2,size(Bi_ref)[1])
+for marker in 1 : size(test3)[2]-2
+    for num in 1: n_bi[1]
+         index=Bi_ref[num,2]
+         Bi_data[marker,num] = test[(marker+10),(index+9)]
+    end
+end
+
+vcf_cols = Array(test[11:end,1:9])
+Bi_data2 = DataFrame(hcat(vcf_cols, Bi_data), :auto)
+
+println("BI data defined")
+
+Bt_data=Array{Any}(undef,size(test3)[2]-2,size(Bt_ref)[1])
+ for marker in 1 : size(test3)[2]-2
+    for num in 1: n_bt[1]
+       index=Bt_ref[num,2]
+       Bt_data[marker,num] = test[(marker+10),(index+9)]
+    end
+end
+
+Bt_data2 = DataFrame(hcat(vcf_cols, Bt_data), :auto)
+
+println("BT data defined")
+
+#Calculate Bt_haps
+Bt_haps=haplotype(hap_size,Bt_data2)
+
+#Calculate Bi haps
+Bi_haps=haplotype(hap_size,Bi_data2)
+
+println("Haps defined")
+
+#i is taurus/indicus original dataset name (Bt_data2 or Bi_data2)
+#j= haplotype file name that saved haplotype function output eg Bt_haps
+function hap_frequency(i, j)
+    B = DataFrame([[names(j)]; collect.(eachrow(j))], [:column; Symbol.(axes(j, 1))])
+    #Drops the first column of dataframe that was created in transpose
+    select!(B, Not([:column]))
+    #Gets list of first row in DataFrame that will be used as column names
+    B_names=Array(B[1,:])
+    #Renames dataframe using the column names defines above
+    rename!(B, Symbol.(B_names))
+    #Removes the first row of Dataframe in place (removes the values that are now being used as column names)
+    B = B[setdiff(1:end, 1), :]
+    tot = (size(i)[2]-9)*2
+    HAP_ID=Int[]
+    NSNP=Int[]
+    HAP=String[]
+    COUNT1=Int[]
+    FREQ=Float64[]
+    for hap in 1 : size(B)[2]
+        tmp = combine(groupby(B, hap), nrow => :count)
+        tmp2 = Array{Any}(undef,size(tmp)[1], 5)
+        for f in 1 : size(tmp)[1]
+            Hap_id=B_names[hap]
+            Nsnp = size(split(tmp[f,1],""))[1]
+            Hap = tmp[f,1]
+            Count1 = tmp[f,2]
+            Freq = tmp[f,2]/tot
+            push!(HAP_ID, Hap_id)
+            push!(NSNP, Nsnp)
+            push!(HAP, Hap)
+            push!(COUNT1, Count1)
+            push!(FREQ, Freq)
+        end
+    end
+    return DataFrame(hap_id=HAP_ID,nsnp=NSNP,hap=HAP,count=COUNT1,freq=FREQ)
+end
+
+
+println("Hap frequency function ok")
+
+#Calculate Bt haplotype hap_frequency
+Bt_hap_freq = hap_frequency(Bt_data2,Bt_haps)
+
+#Calculate Bi haplotype hap_frequency
+Bi_hap_freq = hap_frequency(Bi_data2,Bi_haps)
+
+println("ref hap freq calculated")
+
+########################VALIDATION ANALYSIS ##################################
+println("Now starting Validation analysis")
+
+#Read in validation dataset and remove 10 header lines for analysis
+valid =DataFrame(readdlm("valid.vcf"), :auto)
+#Need to drop vcf header lines to calculate haplotypes
+valid2 = valid[11:end,:]
+
+println("Now creating validation haplotypes")
+#Create haplotypes using
+validation_haps = haplotype(hap_size,valid2)
+size(validation_haps)
+
+println("Calculating b values")
+b_values=Array{Any}(undef,size(validation_haps)[1],size(validation_haps)[2])
+boa=Array{Any}(undef,size(validation_haps)[1],size(validation_haps)[2])
+nanim=size(valid2[:,10:end])[2]
+origin=Array{Any}(undef,size(boa)[1],nanim)
+r = collect(2:2:size(boa)[2])
+i=1
+
+for hap in 1: size(validation_haps)[1]
+    for anim in 1:size(validation_haps)[2]-1
+        tmp2 = validation_haps[hap,:x1]
+        tmp2_Bt = @subset(Bt_hap_freq, :hap_id .== tmp2)
+        tmp2_Bi = @subset(Bi_hap_freq, :hap_id .== tmp2)
+        h = validation_haps[hap,anim+1]
+        tmp3_Bi =  @subset(tmp2_Bi, :hap .== h)
+        tmp3_Bt =  @subset(tmp2_Bt, :hap .== h)
+        if (size(tmp3_Bi)[1] < 1 && size(tmp3_Bt)[1] > 0)
+            tmp3_Bi_freq = 0.0
+            tmp3_Bt_freq=tmp3_Bt[:,:freq]
+            b_values[hap,anim+1] = (tmp3_Bi_freq/(tmp3_Bi_freq .+ tmp3_Bt_freq))[1]
+            boa[hap,anim+1] = "Bt"
+        elseif (size(tmp3_Bt)[1] < 1 && size(tmp3_Bi)[1] > 0)
+            tmp3_Bt_freq = 0.0
+            tmp3_Bi_freq=tmp3_Bi[:,:freq]
+            b_values[hap,anim+1] = (tmp3_Bi_freq/(tmp3_Bi_freq .+ tmp3_Bt_freq))[1]
+            boa[hap,anim+1] = "Bi"
+        elseif (size(tmp3_Bt)[1] < 1 && size(tmp3_Bi)[1] < 1)
+            Bt_hamming=[]
+            Bi_hamming=[]
+            for f in 1:size(tmp2_Bt)[1]
+            append!(Bt_hamming,compare(h,tmp2_Bt[f,:hap],Hamming()))
+            end
+            for f in 1:size(tmp2_Bi)[1]
+            append!(Bi_hamming,compare(h,tmp2_Bi[f,:hap],Hamming()))
+            end
+            Bt_h = sum(Bt_hamming)/(sum(Bt_hamming)+sum(Bi_hamming))
+            Bi_h = sum(Bi_hamming)/(sum(Bt_hamming)+ sum(Bi_hamming))
+            if (Bt_h < Bi_h)
+                boa[hap,anim+1] = "Bi"
+                b_values[hap,anim+1] = Bi_h
+            elseif (Bi_h < Bt_h)
+                boa[hap,anim+1] = "Bt"
+                b_values[hap,anim+1] = Bt_h
+            else
+                boa[hap,anim+1] = "Bi"
+                b_values[hap,anim+1] = Bi_h
+            end
+
+        else
+            tmp3_Bt_freq=tmp3_Bt[:,:freq]
+            tmp3_Bi_freq=tmp3_Bi[:,:freq]
+            p = (tmp3_Bi_freq/(tmp3_Bi_freq .+ tmp3_Bt_freq))
+            b_values[hap,anim+1] = p[1]
+            boa[hap,anim+1] = ifelse(p[] < 0.5, "Bt","Bi")
+        end
+        b_values[hap,1] = validation_haps[hap,:x1]
+        boa[hap,1] = validation_haps[hap,:x1]
+    end
+
+    for id in r
+        s1 = boa[hap,id]
+        s2 = boa[hap,(id+1)]
+        origin[hap,Int(id/2)] = s1*s2
+    end
+end
+
+#This loop creates a list of haplotype names with each haplotype occuring a specific number of times = n snp in ahplotype to join to marker list
+println("joining haplotypes to markers")
+r=1
+
+n= size(Bt_haps)[1]
+marker_hap_list = []
+for rr in 1 : n
+    ml = parse.(Int,(split(Bt_haps[rr,:x3],"")))
+    nhap =fill(Bt_haps[rr,:x1], size(ml)[1])
+    append!(marker_hap_list, nhap)
+end
+
+marker_list=valid2[:,:x2]
+marker_hap_ref = DataFrame(hcat(marker_list,marker_hap_list), :auto)
+
+println("Makng X matrix")
+############# Make X matrix ###########################################
+data4 = innerjoin(marker_hap_ref, valid2, on = :x1 => :x2, makeunique=true)
+
+replace!.(eachcol(data4[!, 10:end]), "0|0" => 0)
+#replace in place (so re-write dataframe) and remove 1|0
+replace!.(eachcol(data4[!, 10:end]), "1|0" => 1)
+#replace in place (so re-write dataframe) and remove 0|1
+replace!.(eachcol(data4[!, 10:end]), "0|1" => 1)
+#replace in place (so re-write dataframe) and remove 1|1
+replace!.(eachcol(data4[!, 10:end]), "1|1" => 2)
+
+origin_list = DataFrame(hcat(validation_haps[:,:x1],origin), :auto)
+nsnp=size(data4)[1]
+println("nsnp is $nsnp")
+X = zeros(size(data4)[2]-10,nsnp*3)
+println("size of X is size(X)")
+marker_hap_list = []
+println("joining haplotypes to markers")
+r=1
+ml=[]
+n= size(Bt_haps)[1]
+marker_hap_list = []
+for rr in 1 : n
+    ml = parse.(Int,(split(Bt_haps[rr,:x3],"")))
+    nhap =fill(Bt_haps[rr,:x1], size(ml)[1])
+    append!(marker_hap_list, nhap)
+end
+
+for marker in 1 : size(data4)[1]
+    for anim in 1 : size(data4)[2]-10
+        hap = data4[marker,:x2]
+        tmp2 = @subset(origin_list, :x1 .== hap)
+        spp = tmp2[1,anim+1]
+        if spp == "BiBi"
+            c = 0
+        elseif spp == "BtBt"
+                c = 1
+        elseif spp == "BtBi"
+            c = 2
+        elseif spp == "BiBt"
+           c = 2
+        else println("I have no idea what this animal is!")
+        end
+        x_fill = data4[marker,anim+10]
+            if marker > 1
+                x_col_ind = ((marker - 1)*3) +1
+                x_col = x_col_ind + c
+                X[anim,x_col] = x_fill
+            else x_col_ind = 1
+                x_col = x_col_ind + c
+                X[anim,x_col] = x_fill
+            end
+        end
+    end
+
+
+println("Writing out files")
+writedlm("X.txt", X)
+CSV.write("Bi_haps.txt", Bi_haps;delim=' ',header=false)
+CSV.write("Bt_haps.txt", Bt_haps;delim=' ',header=false)
+CSV.write("Bi_hap_freq.txt", Bi_hap_freq;delim=' ',header=true)
+CSV.write("Bt_hap_freq.txt", Bt_hap_freq;delim=' ',header=true)
+writedlm("b_values.txt", b_values)
+writedlm("origin.txt", origin)
